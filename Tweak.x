@@ -29,182 +29,129 @@ static void ShowAlert(NSString *title, NSString *msg) {
     });
 }
 
-// -- 递归搜索目录，返回匹配的文件路径 ------------------------
-static NSMutableArray<NSString *> *SearchDir(NSString *dir, NSArray<NSString *> *keywords) {
-    NSMutableArray *results = [NSMutableArray array];
-    @try {
-        NSFileManager *fm = [NSFileManager defaultManager];
-        NSDirectoryEnumerator *en = [fm enumeratorAtPath:dir];
-        NSString *file;
-        while ((file = [en nextObject])) {
-            NSString *lower = file.lowercaseString;
-            for (NSString *kw in keywords) {
-                if ([lower containsString:kw]) {
-                    NSString *full = [dir stringByAppendingPathComponent:file];
-                    NSDictionary *attrs = [fm attributesOfItemAtPath:full error:nil];
-                    unsigned long long size = [attrs fileSize];
-                    [results addObject:[NSString stringWithFormat:@"%@ (%llu bytes)", file, size]];
-                    break;
-                }
-            }
-        }
-    } @catch (NSException *e) {
-        [results addObject:[NSString stringWithFormat:@"error: %@", e.reason]];
-    }
-    return results;
-}
-
-// -- 读取 plist 并搜索含 BLE key 的 entry --------------------
-static void ScanPlistAtPath(NSString *path, NSMutableString *msg) {
-    @try {
-        NSDictionary *d = [NSDictionary dictionaryWithContentsOfFile:path];
-        if (!d) return;
-        [msg appendFormat:@"\n  [F] %@\n", path.lastPathComponent];
-        [msg appendFormat:@"     %lu keys\n", (unsigned long)d.count];
-
-        // 搜索 BLE 钥匙相关 key
-        for (NSString *key in d) {
-            NSString *kl = key.lowercaseString;
-            if ([kl containsString:@"ble"] || [kl containsString:@"sp_ble"] ||
-                [kl containsString:@"masterkey"] || [kl containsString:@"keyid"] ||
-                [kl containsString:@"flutter"] || [kl containsString:@"digitalkey"]) {
-                id val = d[key];
-                NSString *type = NSStringFromClass([val class]);
-                NSString *preview = @"";
-                if ([val isKindOfClass:NSString.class]) {
-                    preview = [(NSString *)val length] > 120
-                        ? [[(NSString *)val substringToIndex:120] stringByAppendingString:@"..."]
-                        : val;
-                }
-                [msg appendFormat:@"     [*] %@ (%@) = %@\n", key, type, preview];
-            }
-        }
-
-        // 检查整个 dict 是否含 flutter.sp_ble_key
-        if (d[@"flutter.sp_ble_key"]) {
-            [msg appendFormat:@"     [OK][OK] flutter.sp_ble_key = %@\n", d[@"flutter.sp_ble_key"]];
-        }
-    } @catch (NSException *e) {}
-}
-
-// -- 主诊断 --------------------------------------------------
 static void RunDiagnostic(void) {
     if (alertShown) return;
     NSMutableString *msg = [NSMutableString string];
     NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
     NSDictionary *all = [ud dictionaryRepresentation];
 
-    // -- 1. Car Status -----------------------------------------
+    // -- 1. Car status --
     [msg appendString:@"-- Car Status --\n"];
     NSDictionary *status = nil;
     for (NSString *key in all) {
         if ([key hasPrefix:@"CYUnifiedCarStatusInfosFor"]) {
-            id val = all[key];
-            if ([val isKindOfClass:NSDictionary.class]) { status = val; break; }
+            id val = [all objectForKey:key];
+            if ([val isKindOfClass:[NSDictionary class]]) { status = val; break; }
         }
     }
     if (status) {
-        [msg appendFormat:@"bat:%@pct range:%@+%@km mileage:%@km\n",
-              status[@"batterySoc"], status[@"leftMileage"],
-              status[@"oilLeftMileage"], status[@"mileage]];
-        [msg appendFormat:@"  temp:%@C volt:%@V lock:%@ ac:%@\n",
-              status[@"interiorTemperature"], status[@"voltage"],
-              [status[@"doorLockStatus"] intValue] == 0 ? @"Y" : @"N",
-              [status[@"acStatus"] intValue] == 1 ? @"ON" : @"OFF"];
+        id bat = [status objectForKey:@"batterySoc"];
+        id rangeE = [status objectForKey:@"leftMileage"];
+        id rangeO = [status objectForKey:@"oilLeftMileage"];
+        id ml = [status objectForKey:@"mileage"];
+        id temp = [status objectForKey:@"interiorTemperature"];
+        id volt = [status objectForKey:@"voltage"];
+        id lock = [status objectForKey:@"doorLockStatus"];
+        id ac = [status objectForKey:@"acStatus"];
+        NSString *lockStr = [lock intValue] == 0 ? @"Locked" : @"Unlocked";
+        NSString *acStr = [ac intValue] == 1 ? @"ON" : @"OFF";
+        [msg appendFormat:@"[OK] bat:%@%% range:%@+%@km mileage:%@km\n", bat, rangeE, rangeO, ml];
+        [msg appendFormat:@"  temp:%@C volt:%@V lock:%@ ac:%@\n", temp, volt, lockStr, acStr];
     } else {
         [msg appendString:@"- none\n"];
     }
 
-    // -- 2. BLE 钥匙 (NSUserDefaults) ------------------------
+    // -- 2. BLE key in NSUserDefaults --
     [msg appendString:@"\n-- NSUserDefaults BLE --\n"];
     BOOL foundBle = NO;
     for (NSString *key in all) {
-        NSString *kl = key.lowercaseString;
+        NSString *kl = [key lowercaseString];
         if ([kl containsString:@"sp_ble"] || [kl containsString:@"blekey"] ||
             [kl containsString:@"masterkey"] || [kl containsString:@"digitalkey"] ||
             ([kl containsString:@"flutter"] && [kl containsString:@"key"])) {
-            id val = all[key];
-            NSString *preview = @"";
-            if ([val isKindOfClass:NSString.class]) {
-                preview = [(NSString *)val length] > 100
-                    ? [[(NSString *)val substringToIndex:100] stringByAppendingString:@"..."] : val;
-            }
+            id val = [all objectForKey:key];
+            NSString *preview = [val description];
+            if ([preview length] > 100) preview = [[preview substringToIndex:100] stringByAppendingString:@"..."];
             [msg appendFormat:@"  [*] %@ = %@\n", key, preview];
             foundBle = YES;
         }
     }
     if (!foundBle) [msg appendString:@"  - none\n"];
 
-    // -- 3. 搜索自己容器 -------------------------------------
+    // -- 3. Container Preferences dir --
     NSString *home = NSHomeDirectory();
     NSString *libDir = [home stringByAppendingPathComponent:@"Library"];
     NSString *docsDir = [home stringByAppendingPathComponent:@"Documents"];
     NSString *prefDir = [libDir stringByAppendingPathComponent:@"Preferences"];
+    NSFileManager *fm = [NSFileManager defaultManager];
 
     [msg appendString:@"\n-- Container Prefs --\n"];
-    NSFileManager *fm = [NSFileManager defaultManager];
     NSArray *prefFiles = [fm contentsOfDirectoryAtPath:prefDir error:nil];
     [msg appendFormat:@"  Total %lu files\n", (unsigned long)prefFiles.count];
     for (NSString *f in prefFiles) {
         NSString *full = [prefDir stringByAppendingPathComponent:f];
-        NSDictionary *a = [fm attributesOfItemAtPath:full error:nil];
-        [msg appendFormat:@"  [F] %@ (%lld bytes)\n", f, [a fileSize]];
+        NSDictionary *attrs = [fm attributesOfItemAtPath:full error:nil];
+        [msg appendFormat:@"  [F] %@ (%lld bytes)\n", f, [attrs fileSize]];
     }
 
-    // -- 4. 递归搜 Documents 和 Library ---------------------
-    NSArray *keywords = @[@"flutter", @"sp_", @"ble", @"key", @"shared_pref", @"preference"];
-    [msg appendString:@"\n-- Documents Scan --\n"];
-    NSMutableArray *docResults = SearchDir(docsDir, keywords);
-    if (docResults.count > 0) {
-        for (NSString *r in docResults) [msg appendFormat:@"  %@\n", r];
-    } else {
-        [msg appendString:@"  (no match)\n"];
-    }
-
-    [msg appendString:@"\n-- Library Scan --\n"];
-    NSMutableArray *libResults = SearchDir(libDir, keywords);
-    if (libResults.count > 0) {
-        for (NSString *r in libResults) [msg appendFormat:@"  %@\n", r];
-    } else {
-        [msg appendString:@"  (no match)\n"];
-    }
-
-    // -- 5. 读取 Preferences 目录中所有 plist ----------------
-    [msg appendString:@"\n-- Prefs plist --\n"];
+    // -- 4. Scan Library/Preferences plists for BLE keys --
+    [msg appendString:@"\n-- Plist Content --\n"];
     for (NSString *f in prefFiles) {
-        if ([f.pathExtension isEqualToString:@"plist"]) {
-            NSString *full = [prefDir stringByAppendingPathComponent:f];
-            ScanPlistAtPath(full, msg);
-        }
-    }
-
-    // -- 6. 尝试读 Flutter SharedPrefs ----------------
-    // Flutter shared_preferences 有时存在 Documents/shared_preferences/
-    [msg appendString:@"\n-- Flutter SharedPrefs --\n"];
-    NSString *spDir = [docsDir stringByAppendingPathComponent:@"shared_preferences"];
-    if ([fm fileExistsAtPath:spDir]) {
-        NSArray *spFiles = [fm contentsOfDirectoryAtPath:spDir error:nil];
-        for (NSString *f in spFiles) {
-            NSString *full = [spDir stringByAppendingPathComponent:f];
-            NSDictionary *a = [fm attributesOfItemAtPath:full error:nil];
-            [msg appendFormat:@"  [F] %@ (%lld bytes)\n", f, [a fileSize]];
-            // 如果是 plist 尝试读取
-            if ([f.pathExtension isEqualToString:@"plist"]) {
-                ScanPlistAtPath(full, msg);
+        if ([[f pathExtension] isEqualToString:@"plist"]) {
+            NSString *full = [prefDir stringByAppending:f];
+            NSDictionary *d = [NSDictionary dictionaryWithContentsOfFile:full];
+            if (!d) continue;
+            [msg appendFormat:@"\n  [F] %@ (%lu keys)\n", f, (unsigned long)d.count];
+            for (NSString *key in d) {
+                NSString *kl = [key lowercaseString];
+                if ([kl containsString:@"ble"] || [kl containsString:@"sp_ble"] ||
+                    [kl containsString:@"masterkey"] || [kl containsString:@"digitalkey"] ||
+                    [kl containsString:@"flutter"]) {
+                    id val = [d objectForKey:key];
+                    NSString *preview = [val description];
+                    if ([preview length] > 120) preview = [[preview substringToIndex:120] stringByAppendingString:@"..."];
+                    [msg appendFormat:@"    [*] %@ = %@\n", key, preview];
+                }
             }
         }
-    } else {
-        [msg appendFormat:@"  [X] not found: %@\n", spDir.lastPathComponent];
     }
 
-    // -- 7. Container Root列出 -----------------------------------
+    // -- 5. Recursive search Documents --
+    [msg appendString:@"\n-- Documents Scan --\n"];
+    NSDirectoryEnumerator *en = [fm enumeratorAtPath:docsDir];
+    NSString *file;
+    while ((file = [en nextObject])) {
+        NSString *kl = [file lowercaseString];
+        if ([kl containsString:@"flutter"] || [kl containsString:@"sp_"] ||
+            [kl containsString:@"ble"] || [kl containsString:@"shared_pref"] ||
+            [kl containsString:@"preference"]) {
+            NSString *full = [docsDir stringByAppendingPathComponent:file];
+            NSDictionary *attrs = [fm attributesOfItemAtPath:full error:nil];
+            [msg appendFormat:@"  [F] %@ (%lld bytes)\n", file, [attrs fileSize]];
+        }
+    }
+
+    // -- 6. Recursive search Library --
+    [msg appendString:@"\n-- Library Scan --\n"];
+    en = [fm enumeratorAtPath:libDir];
+    while ((file = [en nextObject])) {
+        NSString *kl = [file lowercaseString];
+        if ([kl containsString:@"flutter"] || [kl containsString:@"sp_"] ||
+            [kl containsString:@"shared_pref"] || [kl containsString:@"preference"]) {
+            NSString *full = [libDir stringByAppendingPathComponent:file];
+            NSDictionary *attrs = [fm attributesOfItemAtPath:full error:nil];
+            [msg appendFormat:@"  [F] %@ (%lld bytes)\n", file, [attrs fileSize]];
+        }
+    }
+
+    // -- 7. Container root listing --
     [msg appendFormat:@"\n-- Container Root --\n  home: %@\n", home];
     NSArray *rootFiles = [fm contentsOfDirectoryAtPath:home error:nil];
     for (NSString *f in rootFiles) {
         [msg appendFormat:@"  [D] %@\n", f];
     }
 
-    // 列出 Library Subs
+    // -- 8. Library sub-dirs --
     NSArray *libSubs = [fm contentsOfDirectoryAtPath:libDir error:nil];
     [msg appendFormat:@"\n-- Library Subs (%lu) --\n", (unsigned long)libSubs.count];
     for (NSString *f in libSubs) {
@@ -214,13 +161,18 @@ static void RunDiagnostic(void) {
         [msg appendFormat:@"  %@ %@\n", isDir ? @"[D]" : @"[F]", f];
     }
 
-    ShowAlert(@" Diagnostic v5", msg);
+    // -- 9. Process info --
+    [msg appendFormat:@"\n-- Process --\n  name: %@\n  bundle: %@\n",
+          [[NSProcessInfo processInfo] processName],
+          [[NSBundle mainBundle] bundleIdentifier] ?: @"(nil)"];
+
+    ShowAlert(@"Diagnostic v5", msg);
     NSLog(@"[BleVerify] diagnostic:\n%@", msg);
 }
 
 %ctor {
     @autoreleasepool {
-        NSLog(@"[BleVerify] loaded in %@", NSProcessInfo.processInfo.processName);
+        NSLog(@"[BleVerify] loaded in %@", [[NSProcessInfo processInfo] processName]);
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{ RunDiagnostic(); });
     }
