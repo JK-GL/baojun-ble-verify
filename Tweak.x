@@ -63,8 +63,8 @@ static void ShowBleKeyAlert(void) {
             [msg appendFormat:@"⏳ endTime:   %@\n",     bleKey[@"endTime"]];
         } else {
             [msg appendString:@"❌ BLE 钥匙数据未找到\n"];
-            [msg appendFormat:@"  flutter.sp_ble_key = %@\n",
-                  [keyJson class] ?: @"nil"];
+            [msg appendFormat:@"  raw value class: %@\n",
+                  keyJson ? NSStringFromClass([keyJson class]) : @"nil"];
         }
 
         if (status) {
@@ -116,9 +116,6 @@ static void ShowBleKeyAlert(void) {
                         }
                     }
                     if (top) break;
-                }
-                if (!top) {
-                    top = UIApplication.sharedApplication.keyWindow.rootViewController;
                 }
                 // 向上找到最顶层 presented VC
                 while (top.presentedViewController) {
