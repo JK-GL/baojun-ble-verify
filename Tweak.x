@@ -157,7 +157,7 @@ static void ScanAll(void) {
     [msg appendFormat:@"%@ %@\n", exists ? @"✅" : @"❌", hardcoded];
     if (exists) {
         NSDictionary *d = [NSDictionary dictionaryWithContentsOfFile:hardcoded];
-        [msg appendFormat:@"  keys: %lu\n", (unsigned long)d.count);
+        [msg appendFormat:@"  keys: %lu\n", (unsigned long)d.count];
     }
 
     ShowMsg(msg);
