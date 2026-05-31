@@ -98,7 +98,7 @@ static void RunDiagnostic(void) {
     [msg appendString:@"\n-- Plist Content --\n"];
     for (NSString *f in prefFiles) {
         if ([[f pathExtension] isEqualToString:@"plist"]) {
-            NSString *full = [prefDir stringByAppending:f];
+            NSString *full = [prefDir stringByAppendingPathComponent:f];
             NSDictionary *d = [NSDictionary dictionaryWithContentsOfFile:full];
             if (!d) continue;
             [msg appendFormat:@"\n  [F] %@ (%lu keys)\n", f, (unsigned long)d.count];
