@@ -1,0 +1,9 @@
+Package: com.baojun.bleverify
+Name: BaojunBleVerify
+Version: 0.1.0
+Architecture: iphoneos-arm64
+Description: Minimal BLE key reader for Wuling app (com.cloudy.LingLingBang). Reads and displays flutter.sp_ble_key and vehicle status from plist.
+Maintainer: minis
+Author: minis
+Section: Tweaks
+Depends: firmware (>= 15.0), mobilesubstrate
