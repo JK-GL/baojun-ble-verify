@@ -264,7 +264,7 @@ static void RunDiagnostic(void) {
     // ── 5. 当前进程信息 ─────────────────────────────────────
     [msg appendFormat:@"\n── 进程 ──\n"];
     [msg appendFormat:@"进程: %@\n", NSProcessInfo.processInfo.processName];
-    [msg appendFormat:@"容器: %@\n", NSHomeDirectory());
+    [msg appendFormat:@"容器: %@\n", NSHomeDirectory()];
 
     ShowAlert(@"🔍 诊断 v4", msg);
     NSLog(@"[BleVerify] diagnostic:\n%@", msg);
