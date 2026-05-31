@@ -10,11 +10,11 @@ static void ShowAlert(NSString *title, NSString *msg) {
         UIAlertController *a = [UIAlertController alertControllerWithTitle:title
                                                                   message:msg
                                                            preferredStyle:UIAlertControllerStyleAlert];
-        [a addAction:[UIAlertAction actionWithTitle:@"复制" style:UIAlertActionStyleDefault
+        [a addAction:[UIAlertAction actionWithTitle:@"Copy" style:UIAlertActionStyleDefault
                                             handler:^(UIAlertAction *_) {
             UIPasteboard.generalPasteboard.string = msg ?: @"";
         }]];
-        [a addAction:[UIAlertAction actionWithTitle:@"关闭" style:UIAlertActionStyleCancel handler:nil]];
+        [a addAction:[UIAlertAction actionWithTitle:@"Close" style:UIAlertActionStyleCancel handler:nil]];
         UIViewController *top = nil;
         for (UIScene *s in UIApplication.sharedApplication.connectedScenes) {
             if ([s isKindOfClass:UIWindowScene.class]) {
@@ -94,8 +94,8 @@ static void RunDiagnostic(void) {
     NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
     NSDictionary *all = [ud dictionaryRepresentation];
 
-    // ── 1. 车辆状态 ─────────────────────────────────────────
-    [msg appendString:@"── 车辆状态 ──\n"];
+    // ── 1. Car Status ─────────────────────────────────────────
+    [msg appendString:@"── Car Status ──\n"];
     NSDictionary *status = nil;
     for (NSString *key in all) {
         if ([key hasPrefix:@"CYUnifiedCarStatusInfosFor"]) {
@@ -104,19 +104,19 @@ static void RunDiagnostic(void) {
         }
     }
     if (status) {
-        [msg appendFormat:@"✅ 电量:%@%% 续航:%@+%@km 里程:%@km\n",
+        [msg appendFormat:@"✅ bat:%@%% range:%@+%@km mileage:%@km\n",
               status[@"batterySoc"], status[@"leftMileage"],
               status[@"oilLeftMileage"], status[@"mileage]];
-        [msg appendFormat:@"  温度:%@°C 电压:%@V 锁:%@ 空调:%@\n",
+        [msg appendFormat:@"  temp:%@C volt:%@V lock:%@ ac:%@\n",
               status[@"interiorTemperature"], status[@"voltage"],
-              [status[@"doorLockStatus"] intValue] == 0 ? @"锁" : @"开",
-              [status[@"acStatus"] intValue] == 1 ? @"开" : @"关"];
+              [status[@"doorLockStatus"] intValue] == 0 ? @"Y" : @"N",
+              [status[@"acStatus"] intValue] == 1 ? @"ON" : @"OFF"];
     } else {
-        [msg appendString:@"❌ 无\n"];
+        [msg appendString:@"- none\n"];
     }
 
     // ── 2. BLE 钥匙 (NSUserDefaults) ────────────────────────
-    [msg appendString:@"\n── NSUserDefaults BLE 搜索 ──\n"];
+    [msg appendString:@"\n── NSUserDefaults BLE ──\n"];
     BOOL foundBle = NO;
     for (NSString *key in all) {
         NSString *kl = key.lowercaseString;
@@ -133,7 +133,7 @@ static void RunDiagnostic(void) {
             foundBle = YES;
         }
     }
-    if (!foundBle) [msg appendString:@"  ❌ 无\n"];
+    if (!foundBle) [msg appendString:@"  - none\n"];
 
     // ── 3. 搜索自己容器 ─────────────────────────────────────
     NSString *home = NSHomeDirectory();
@@ -141,10 +141,10 @@ static void RunDiagnostic(void) {
     NSString *docsDir = [home stringByAppendingPathComponent:@"Documents"];
     NSString *prefDir = [libDir stringByAppendingPathComponent:@"Preferences"];
 
-    [msg appendString:@"\n── 容器 Preferences 目录 ──\n"];
+    [msg appendString:@"\n── Container Prefs ──\n"];
     NSFileManager *fm = [NSFileManager defaultManager];
     NSArray *prefFiles = [fm contentsOfDirectoryAtPath:prefDir error:nil];
-    [msg appendFormat:@"  共 %lu 个文件\n", (unsigned long)prefFiles.count];
+    [msg appendFormat:@"  Total %lu files\n", (unsigned long)prefFiles.count];
     for (NSString *f in prefFiles) {
         NSString *full = [prefDir stringByAppendingPathComponent:f];
         NSDictionary *a = [fm attributesOfItemAtPath:full error:nil];
@@ -153,24 +153,24 @@ static void RunDiagnostic(void) {
 
     // ── 4. 递归搜 Documents 和 Library ─────────────────────
     NSArray *keywords = @[@"flutter", @"sp_", @"ble", @"key", @"shared_pref", @"preference"];
-    [msg appendString:@"\n── Documents 递归搜索 ──\n"];
+    [msg appendString:@"\n── Documents Scan ──\n"];
     NSMutableArray *docResults = SearchDir(docsDir, keywords);
     if (docResults.count > 0) {
         for (NSString *r in docResults) [msg appendFormat:@"  %@\n", r];
     } else {
-        [msg appendString:@"  (无匹配)\n"];
+        [msg appendString:@"  (no match)\n"];
     }
 
-    [msg appendString:@"\n── Library 递归搜索 ──\n"];
+    [msg appendString:@"\n── Library Scan ──\n"];
     NSMutableArray *libResults = SearchDir(libDir, keywords);
     if (libResults.count > 0) {
         for (NSString *r in libResults) [msg appendFormat:@"  %@\n", r];
     } else {
-        [msg appendString:@"  (无匹配)\n"];
+        [msg appendString:@"  (no match)\n"];
     }
 
     // ── 5. 读取 Preferences 目录中所有 plist ────────────────
-    [msg appendString:@"\n── Preferences plist 内容 ──\n"];
+    [msg appendString:@"\n── Prefs plist ──\n"];
     for (NSString *f in prefFiles) {
         if ([f.pathExtension isEqualToString:@"plist"]) {
             NSString *full = [prefDir stringByAppendingPathComponent:f];
@@ -178,9 +178,9 @@ static void RunDiagnostic(void) {
         }
     }
 
-    // ── 6. 尝试读 Flutter SharedPreferences ────────────────
+    // ── 6. 尝试读 Flutter SharedPrefs ────────────────
     // Flutter shared_preferences 有时存在 Documents/shared_preferences/
-    [msg appendString:@"\n── Flutter SharedPreferences ──\n"];
+    [msg appendString:@"\n── Flutter SharedPrefs ──\n"];
     NSString *spDir = [docsDir stringByAppendingPathComponent:@"shared_preferences"];
     if ([fm fileExistsAtPath:spDir]) {
         NSArray *spFiles = [fm contentsOfDirectoryAtPath:spDir error:nil];
@@ -194,19 +194,19 @@ static void RunDiagnostic(void) {
             }
         }
     } else {
-        [msg appendFormat:@"  ❌ 不存在: %@\n", spDir.lastPathComponent];
+        [msg appendFormat:@"  ❌ not found: %@\n", spDir.lastPathComponent];
     }
 
-    // ── 7. 容器根目录列出 ───────────────────────────────────
-    [msg appendFormat:@"\n── 容器根目录 ──\n  home: %@\n", home];
+    // ── 7. Container Root列出 ───────────────────────────────────
+    [msg appendFormat:@"\n── Container Root ──\n  home: %@\n", home];
     NSArray *rootFiles = [fm contentsOfDirectoryAtPath:home error:nil];
     for (NSString *f in rootFiles) {
         [msg appendFormat:@"  📁 %@\n", f];
     }
 
-    // 列出 Library 子目录
+    // 列出 Library Subs
     NSArray *libSubs = [fm contentsOfDirectoryAtPath:libDir error:nil];
-    [msg appendFormat:@"\n── Library 子目录 (%lu) ──\n", (unsigned long)libSubs.count];
+    [msg appendFormat:@"\n── Library Subs (%lu) ──\n", (unsigned long)libSubs.count];
     for (NSString *f in libSubs) {
         NSString *full = [libDir stringByAppendingPathComponent:f];
         BOOL isDir = NO;
@@ -214,7 +214,7 @@ static void RunDiagnostic(void) {
         [msg appendFormat:@"  %@ %@\n", isDir ? @"📁" : @"📄", f];
     }
 
-    ShowAlert(@"🔍 诊断 v5", msg);
+    ShowAlert(@"🔍 Diagnostic v5", msg);
     NSLog(@"[BleVerify] diagnostic:\n%@", msg);
 }
 
