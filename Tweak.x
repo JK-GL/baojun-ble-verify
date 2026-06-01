@@ -206,26 +206,41 @@ static void Startup(void) {
             }
         }
 
-        // 2. Read SavedOAuthModel file
-        NSString *home = NSHomeDirectory();
-        NSString *oauthPath = [home stringByAppendingPathComponent:@"SavedOAuthModel"];
-        NSData *oauthData = [NSData dataWithContentsOfFile:oauthPath];
+        // 2. Read SavedOAuthModel from AppGroup
+        NSString *appGroupBase = @"/var/mobile/Containers/Shared/AppGroup";
+        NSFileManager *fm = [NSFileManager defaultManager];
+        NSArray *groupUUIDs = [fm contentsOfDirectoryAtPath:appGroupBase error:nil];
+        NSData *oauthData = nil;
+        NSString *foundPath = nil;
+
+        for (NSString *uuid in groupUUIDs) {
+            NSString *candidate = [[appGroupBase stringByAppendingPathComponent:uuid]
+                                   stringByAppendingPathComponent:@"SavedOAuthModel"];
+            if ([fm fileExistsAtPath:candidate]) {
+                oauthData = [NSData dataWithContentsOfFile:candidate];
+                if (oauthData) {
+                    foundPath = candidate;
+                    break;
+                }
+            }
+        }
 
         if (!oauthData) {
-            [msg appendString:@"\n[!] SavedOAuthModel not found\n"];
-            [msg appendFormat:@"  Path: %@\n", oauthPath];
-
-            // List files in container root
-            NSFileManager *fm = [NSFileManager defaultManager];
-            NSArray *files = [fm contentsOfDirectoryAtPath:home error:nil];
-            [msg appendString:@"\nContainer root files:\n"];
-            for (NSString *f in files) {
-                [msg appendFormat:@"  %@\n", f];
+            [msg appendString:@"\n[!] SavedOAuthModel not found in AppGroup\n"];
+            [msg appendString:@"AppGroup dirs:\n"];
+            for (NSString *uuid in groupUUIDs) {
+                NSString *dir = [appGroupBase stringByAppendingPathComponent:uuid];
+                NSArray *files = [fm contentsOfDirectoryAtPath:dir error:nil];
+                [msg appendFormat:@"  %@/\n", uuid];
+                for (NSString *f in files) {
+                    [msg appendFormat:@"    %@\n", f];
+                }
             }
-
             ShowAlert(@"BLE Key v10", msg);
             return;
         }
+
+        [msg appendFormat:@"\n[OK] Found: %@\n", foundPath];
 
         NSError *jsonErr = nil;
         NSDictionary *oauth = [NSJSONSerialization JSONObjectWithData:oauthData options:0 error:&jsonErr];
