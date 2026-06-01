@@ -1,9 +1,11 @@
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <CommonCrypto/CommonDigest.h>
+#import <objc/runtime.h>
 
 static BOOL alertShown = NO;
-static NSString *savedToken = nil;
+static NSString *capturedToken = nil;
+static BOOL fetchStarted = NO;
 
 static void ShowAlert(NSString *title, NSString *msg) {
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -70,114 +72,121 @@ static NSString *DumpDict(NSDictionary *d) {
 }
 
 // ================================================================
-// Hook SavedOAuthModel to capture token
+// Scan runtime for OAuth-related classes
 // ================================================================
-%hook SavedOAuthModel
+static void ScanOAuthClasses(void) {
+    int numClasses = objc_getClassList(NULL, 0);
+    Class *classes = (Class *)malloc(sizeof(Class) * numClasses);
+    objc_getClassList(classes, numClasses);
 
-- (void)setAccessToken:(NSString *)token {
-    NSLog(@"[BleVerify] SavedOAuthModel setAccessToken: %@...", [token substringToIndex:MIN(30, token.length)]);
-    savedToken = token;
-    %orig;
-}
-
-- (NSString *)accessToken {
-    NSString *token = %orig;
-    if (token && !savedToken) {
-        NSLog(@"[BleVerify] SavedOAuthModel accessToken => %@...", [token substringToIndex:MIN(30, token.length)]);
-        savedToken = token;
-    }
-    return token;
-}
-
-// Try common init methods
-- (id)initWithDictionary:(NSDictionary *)dict {
-    id result = %orig;
-    if (dict) {
-        NSString *t = [dict objectForKey:@"access_token"];
-        if (t) {
-            NSLog(@"[BleVerify] SavedOAuthModel initWithDict access_token: %@...", [t substringToIndex:MIN(30, t.length)]);
-            savedToken = t;
+    NSMutableString *found = [NSMutableString string];
+    for (int i = 0; i < numClasses; i++) {
+        NSString *name = NSStringFromClass(classes[i]);
+        NSString *lower = [name lowercaseString];
+        if ([lower containsString:@"oauth"] || [lower containsString:@"token"] ||
+            [lower containsString:@"saved"] || [lower containsString:@"auth"] ||
+            [lower containsString:@"login"] || [lower containsString:@"session"]) {
+            [found appendFormat:@"  %@\n", name];
         }
     }
-    return result;
+    free(classes);
+
+    if ([found length] > 0) {
+        NSLog(@"[BleVerify] OAuth/Auth classes:\n%@", found);
+    }
 }
 
-- (void)setValuesForKeysWithDictionary:(NSDictionary *)keyedValues {
-    %orig;
-    if (keyedValues) {
-        NSString *t = [keyedValues objectForKey:@"access_token"];
-        if (t) {
-            NSLog(@"[BleVerify] SavedOAuthModel setValuesForKeys access_token: %@...", [t substringToIndex:MIN(30, t.length)]);
-            savedToken = t;
+// ================================================================
+// Hook NSURLSession to intercept token from request headers
+// ================================================================
+%hook NSURLSession
+
+- (NSURLSessionDataTask *)dataTaskWithRequest:(NSURLRequest *)request
+                            completionHandler:(void (^)(NSData *, NSURLResponse *, NSError *))completionHandler {
+    @try {
+        NSString *token = [request valueForHTTPHeaderField:@"accessToken"];
+        if (token && token.length > 20 && !capturedToken) {
+            capturedToken = token;
+            NSLog(@"[BleVerify] Token captured from network request: %@...", [token substringToIndex:MIN(30, token.length)]);
+
+            // Show what URL was using this token
+            NSLog(@"[BleVerify] URL: %@", [[request URL] absoluteString]);
+
+            // Auto-fetch BLE key
+            if (!fetchStarted) {
+                fetchStarted = YES;
+                dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+                    // Small delay to let more requests complete
+                    [NSThread sleepForTimeInterval:1.0];
+
+                    NSMutableString *msg = [NSMutableString string];
+                    [msg appendString:@"[OK] Token captured from network!\n\n"];
+                    [msg appendFormat:@"URL: %@\n", [[request URL] absoluteString]];
+                    [msg appendFormat:@"Token: %@...\n\n", [token substringToIndex:MIN(40, token.length)]];
+                    [msg appendString:@"Starting BLE key fetch...\n"];
+                    ShowAlert(@"Token Captured", msg);
+                });
+            }
         }
+
+        // Also check for other header names
+        if (!capturedToken) {
+            NSString *auth = [request valueForHTTPHeaderField:@"Authorization"];
+            if (auth && auth.length > 20) {
+                NSLog(@"[BleVerify] Authorization header: %@...", [auth substringToIndex:MIN(30, auth.length)]);
+            }
+        }
+    } @catch (NSException *e) {
+        NSLog(@"[BleVerify] session hook exception: %@", e);
     }
+
+    return %orig;
 }
 
 %end
 
 // ================================================================
-// Also hook CYBaoJunOAuthJSONSString read to find decryption
+// Also hook NSUserDefaults to capture OAuth-related writes
 // ================================================================
-// Hook NSUserDefaults to capture when the app reads the OAuth key
 %hook NSUserDefaults
-
-- (id)objectForKey:(NSString *)defaultName {
-    id result = %orig;
-
-    if ([defaultName isEqualToString:@"CYBaoJunOAuthJSONSString"] && result) {
-        NSLog(@"[BleVerify] objectForKey CYBaoJunOAuthJSONSString => class=%@", NSStringFromClass([result class]));
-
-        // If it's already a dict (decrypted), capture token
-        if ([result isKindOfClass:[NSDictionary class]]) {
-            NSString *t = [result objectForKey:@"access_token"];
-            if (t && !savedToken) {
-                savedToken = t;
-                NSLog(@"[BleVerify] Got token from dict: %@...", [t substringToIndex:MIN(30, t.length)]);
-            }
-        }
-    }
-
-    return result;
-}
 
 - (void)setObject:(id)value forKey:(NSString *)defaultName {
     %orig;
 
     @try {
         if (!defaultName) return;
-
-        // Capture any token-related writes
-        if ([defaultName isEqualToString:@"CYBaoJunOAuthJSONSString"]) {
-            NSLog(@"[BleVerify] setObject CYBaoJunOAuthJSONSString class=%@", NSStringFromClass([value class]));
-        }
-
-        // Capture BLE key writes
         NSString *kl = [defaultName lowercaseString];
-        if ([kl containsString:@"sp_ble"] || [kl containsString:@"flutter"] ||
+
+        // BLE key write
+        if ([kl containsString:@"sp_ble"] || [kl containsString:@"flutter.sp"] ||
             [kl containsString:@"blekey"] || [kl containsString:@"masterkey"]) {
-            NSLog(@"[BleVerify] BLE write: %@ = %@", defaultName, value);
+            NSLog(@"[BleVerify] BLE key write: %@", defaultName);
             if ([value isKindOfClass:[NSString class]] && [(NSString *)value length] > 20) {
-                NSMutableString *msg = [NSMutableString string];
-                [msg appendString:@"[OK] BLE key intercepted!\n\n"];
-                [msg appendFormat:@"Key: %@\nValue:\n%@\n", defaultName, value];
-                ShowAlert(@"BLE Key Write", msg);
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    NSMutableString *msg = [NSMutableString string];
+                    [msg appendString:@"[OK] BLE key write intercepted!\n\n"];
+                    [msg appendFormat:@"Key: %@\n\n", defaultName];
+                    [msg appendFormat:@"Value:\n%@\n", value];
+                    ShowAlert(@"BLE Key Write", msg);
+                });
             }
         }
 
-        if ([defaultName hasPrefix:@"CYUnifiedCarStatusInfos"]) {
-            NSLog(@"[BleVerify] Car status updated: %@", defaultName);
+        // OAuth-related writes
+        if ([kl containsString:@"oauth"] || [kl containsString:@"token"] ||
+            [kl containsString:@"access"]) {
+            NSLog(@"[BleVerify] OAuth write: %@ class=%@", defaultName, NSStringFromClass([value class]));
         }
-    } @catch (NSException *e) {
-        NSLog(@"[BleVerify] hook exception: %@", e);
-    }
+    } @catch (NSException *e) {}
 }
 
 %end
 
 // ================================================================
-// Online fetch function
+// Fetch BLE key online
 // ================================================================
 static void FetchBLEKey(NSString *accessToken) {
+    // Build signed request
     NSString *timestamp = [NSString stringWithFormat:@"%lld", (long long)[[NSDate date] timeIntervalSince1970]];
     NSString *nonce = RandomHex(16);
     NSString *signStr = [NSString stringWithFormat:@"%@%@%@%@%@%@%@%@%@",
@@ -200,7 +209,7 @@ static void FetchBLEKey(NSString *accessToken) {
         @"signature": signature,
     };
 
-    // Step 1: Get VIN + phone
+    // Step 1: Get VIN
     NSURL *url1 = [NSURL URLWithString:@"https://api.baojun.net/junApi/sgmw/userCarRelation/queryDefaultCarStatus"];
     NSMutableURLRequest *req1 = [NSMutableURLRequest requestWithURL:url1];
     [req1 setHTTPMethod:@"POST"];
@@ -209,7 +218,11 @@ static void FetchBLEKey(NSString *accessToken) {
     }
     [req1 setHTTPBody:[@"{}" dataUsingEncoding:NSUTF8StringEncoding]];
 
-    [[[NSURLSession sharedSession] dataTaskWithRequest:req1
+    // Use a plain session to avoid our hook
+    NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration defaultSessionConfiguration];
+    NSURLSession *session = [NSURLSession sessionWithConfiguration:cfg];
+
+    [[session dataTaskWithRequest:req1
         completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
             if (err || !data) {
                 ShowAlert(@"Step1 Error", err ? [err localizedDescription] : @"No data");
@@ -223,11 +236,11 @@ static void FetchBLEKey(NSString *accessToken) {
             NSString *userId = [d objectForKey:@"phone"] ?: [d objectForKey:@"userId"];
 
             if (!vin) {
-                ShowAlert(@"Step1 No VIN", DumpDict(json));
+                ShowAlert(@"No VIN", DumpDict(json));
                 return;
             }
 
-            // Step 2: Get BLE key
+            // Step 2: BLE key query
             NSMutableDictionary *body = [NSMutableDictionary dictionary];
             [body setObject:vin forKey:@"vin"];
             if (userId) [body setObject:userId forKey:@"userId"];
@@ -241,7 +254,7 @@ static void FetchBLEKey(NSString *accessToken) {
             }
             [req2 setHTTPBody:bodyData];
 
-            [[[NSURLSession sharedSession] dataTaskWithRequest:req2
+            [[session dataTaskWithRequest:req2
                 completionHandler:^(NSData *data2, NSURLResponse *resp2, NSError *err2) {
                     if (err2 || !data2) {
                         ShowAlert(@"Step2 Error", err2 ? [err2 localizedDescription] : @"No data");
@@ -273,8 +286,7 @@ static void FetchBLEKey(NSString *accessToken) {
                             [msg appendFormat:@"\nFull data:\n%@\n", DumpDict(d2)];
                         }
                     } else {
-                        [msg appendFormat:@"[X] code=%ld\nVIN=%@ userId=%@\n\n%@\n",
-                              (long)code, vin, userId, DumpDict(json2)];
+                        [msg appendFormat:@"[X] code=%ld\n\n%@\n", (long)code, DumpDict(json2)];
                     }
                     ShowAlert(@"BLE Key", msg);
             }] resume];
@@ -284,59 +296,51 @@ static void FetchBLEKey(NSString *accessToken) {
 // ================================================================
 // Startup
 // ================================================================
-static void TryFetch(void) {
-    if (savedToken) {
-        NSLog(@"[BleVerify] Token captured, starting fetch...");
-        FetchBLEKey(savedToken);
-        return;
+static void Startup(void) {
+    // Scan runtime for OAuth classes
+    ScanOAuthClasses();
+
+    // Show car status
+    NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+    NSDictionary *all = [ud dictionaryRepresentation];
+
+    NSMutableString *msg = [NSMutableString string];
+    [msg appendString:@"-- Car Status --\n"];
+    for (NSString *key in all) {
+        if ([key hasPrefix:@"CYUnifiedCarStatusInfosFor"]) {
+            NSDictionary *status = [all objectForKey:key];
+            if ([status isKindOfClass:[NSDictionary class]]) {
+                [msg appendFormat:@"[OK] bat:%@%% mileage:%@km\n",
+                      [status objectForKey:@"batterySoc"],
+                      [status objectForKey:@"mileage"]];
+                break;
+            }
+        }
     }
 
-    // Wait a bit more for token
-    NSLog(@"[BleVerify] No token yet, waiting 2s...");
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
+    [msg appendString:@"\n-- Token Capture --\n"];
+    [msg appendString:@"Hook: NSURLSession dataTaskWithRequest:\n"];
+    [msg appendString:@"Waiting for app to make API request...\n\n"];
+    [msg appendString:@"The token will be captured from\n"];
+    [msg appendString:@"the accessToken header automatically.\n"];
+    [msg appendString:@"Then BLE key will be fetched online.\n"];
+
+    ShowAlert(@"BLE Key v9", msg);
+
+    // Periodically check if token was captured
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(8.0 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
-        if (savedToken) {
-            FetchBLEKey(savedToken);
-        } else {
-            // Show diagnostic
-            NSMutableString *msg = [NSMutableString string];
-            [msg appendString:@"-- Car Status --\n"];
-            NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
-            NSDictionary *all = [ud dictionaryRepresentation];
-            for (NSString *key in all) {
-                if ([key hasPrefix:@"CYUnifiedCarStatusInfosFor"]) {
-                    NSDictionary *status = [all objectForKey:key];
-                    if ([status isKindOfClass:[NSDictionary class]]) {
-                        [msg appendFormat:@"[OK] bat:%@%% mileage:%@km\n",
-                              [status objectForKey:@"batterySoc"],
-                              [status objectForKey:@"mileage"]];
-                        break;
-                    }
-                }
-            }
-
-            [msg appendString:@"\n-- Token Status --\n"];
-            [msg appendString:@"[X] SavedOAuthModel not loaded yet\n\n"];
-            [msg appendString:@"Hooks active:\n"];
-            [msg appendString:@"  SavedOAuthModel.accessToken (setter/getter)\n"];
-            [msg appendString:@"  SavedOAuthModel.initWithDictionary:\n"];
-            [msg appendString:@"  NSUserDefaults.CYBaoJunOAuthJSONSString\n\n"];
-            [msg appendString:@"The token will be captured when the\n"];
-            [msg appendString:@"app loads it, then auto-fetch runs.\n\n"];
-            [msg appendString:@"Or navigate to a screen that\n"];
-            [msg appendString:@"triggers OAuth token loading.\n"];
-
-            ShowAlert(@"BLE Key v8", msg);
+        if (capturedToken && !fetchStarted) {
+            fetchStarted = YES;
+            FetchBLEKey(capturedToken);
         }
     });
 }
 
 %ctor {
     @autoreleasepool {
-        NSLog(@"[BleVerify] v8 loaded in %@", [[NSProcessInfo processInfo] processName]);
-
-        // Start after 3s
+        NSLog(@"[BleVerify] v9 loaded in %@", [[NSProcessInfo processInfo] processName]);
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{ TryFetch(); });
+                       dispatch_get_main_queue(), ^{ Startup(); });
     }
 }
