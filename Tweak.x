@@ -183,6 +183,7 @@ static void RunAll(void) {
             ShowAlert(@"BLE Key", msg);
             return;
         }
+        [msg appendFormat:@"[OK] %@\n", foundPath.lastPathComponent];
 
         NSDictionary *oauth = [NSJSONSerialization JSONObjectWithData:oauthData options:0 error:nil];
         NSString *token = [oauth objectForKey:@"access_token"];
