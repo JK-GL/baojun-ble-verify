@@ -63,7 +63,7 @@ static NSString *RandomHex(int len) {
 static NSDictionary *BuildHeaders(NSString *accessToken) {
     NSString *timestamp = [NSString stringWithFormat:@"%lld", (long long)[[NSDate date] timeIntervalSince1970]];
     NSString *nonce = RandomHex(16);
-    NSString *signStr = [NSString stringWithFormat:@"%@%@%@%@%@%@%@%@",
+    NSString *signStr = [NSString stringWithFormat:@"%@%@%@%@%@%@%@%@%@",
                          accessToken ?: @"", timestamp, nonce,
                          kClientId, kClientSecret, kAppCode, kAppVersion,
                          @"android", @"15"];
