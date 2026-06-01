@@ -207,34 +207,57 @@ static void Startup(void) {
         }
 
         // 2. Read SavedOAuthModel from AppGroup
-        NSString *appGroupBase = @"/var/mobile/Containers/Shared/AppGroup";
         NSFileManager *fm = [NSFileManager defaultManager];
-        NSArray *groupUUIDs = [fm contentsOfDirectoryAtPath:appGroupBase error:nil];
         NSData *oauthData = nil;
         NSString *foundPath = nil;
 
-        for (NSString *uuid in groupUUIDs) {
-            NSString *candidate = [[appGroupBase stringByAppendingPathComponent:uuid]
-                                   stringByAppendingPathComponent:@"SavedOAuthModel"];
-            if ([fm fileExistsAtPath:candidate]) {
-                oauthData = [NSData dataWithContentsOfFile:candidate];
-                if (oauthData) {
-                    foundPath = candidate;
-                    break;
+        // Try multiple possible group identifiers
+        NSArray *groupIds = @[
+            @"group.com.cloudy.LingLingBang",
+            @"group.com.cloudyoung.linglingbang",
+            @"group.com.cloudy.linglingbang",
+            @"group.baojun",
+            @"group.sgmw",
+        ];
+
+        for (NSString *groupId in groupIds) {
+            NSURL *groupURL = [fm containerURLForSecurityApplicationGroupIdentifier:groupId];
+            if (groupURL) {
+                NSString *candidate = [[groupURL path] stringByAppendingPathComponent:@"SavedOAuthModel"];
+                if ([fm fileExistsAtPath:candidate]) {
+                    oauthData = [NSData dataWithContentsOfFile:candidate];
+                    if (oauthData) {
+                        foundPath = candidate;
+                        break;
+                    }
+                }
+            }
+        }
+
+        // If not found, try to read from known path pattern
+        if (!oauthData) {
+            // Also try direct path with common UUID patterns
+            NSString *appGroupBase = @"/var/mobile/Containers/Shared/AppGroup";
+            NSArray *groupUUIDs = [fm contentsOfDirectoryAtPath:appGroupBase error:nil];
+            for (NSString *uuid in groupUUIDs) {
+                NSString *candidate = [[appGroupBase stringByAppendingPathComponent:uuid]
+                                       stringByAppendingPathComponent:@"SavedOAuthModel"];
+                if ([fm fileExistsAtPath:candidate]) {
+                    oauthData = [NSData dataWithContentsOfFile:candidate];
+                    if (oauthData) {
+                        foundPath = candidate;
+                        break;
+                    }
                 }
             }
         }
 
         if (!oauthData) {
-            [msg appendString:@"\n[!] SavedOAuthModel not found in AppGroup\n"];
-            [msg appendString:@"AppGroup dirs:\n"];
-            for (NSString *uuid in groupUUIDs) {
-                NSString *dir = [appGroupBase stringByAppendingPathComponent:uuid];
-                NSArray *files = [fm contentsOfDirectoryAtPath:dir error:nil];
-                [msg appendFormat:@"  %@/\n", uuid];
-                for (NSString *f in files) {
-                    [msg appendFormat:@"    %@\n", f];
-                }
+            [msg appendString:@"\n[!] SavedOAuthModel not found\n"];
+            [msg appendString:@"Tried group IDs:\n"];
+            for (NSString *gid in groupIds) {
+                NSURL *url = [fm containerURLForSecurityApplicationGroupIdentifier:gid];
+                [msg appendFormat:@"  %@ => %@\n", gid, url ? [url path] : @"nil"];
             }
             ShowAlert(@"BLE Key v10", msg);
             return;
