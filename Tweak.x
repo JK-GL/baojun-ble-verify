@@ -2,12 +2,8 @@
 #import <UIKit/UIKit.h>
 #import <CommonCrypto/CommonDigest.h>
 
-static BOOL alertShown = NO;
-
 static void ShowAlert(NSString *title, NSString *msg) {
     dispatch_async(dispatch_get_main_queue(), ^{
-        if (alertShown) return;
-        alertShown = YES;
         UIAlertController *a = [UIAlertController alertControllerWithTitle:title
                                                                   message:msg
                                                            preferredStyle:UIAlertControllerStyleAlert];
@@ -68,22 +64,132 @@ static NSString *DumpDict(NSDictionary *d) {
 }
 
 // ================================================================
-// online fetch
+// Sync HTTP POST (blocks current thread)
 // ================================================================
-static void FetchBLEKey(NSString *token, NSString *vin, NSString *userId) {
+static NSDictionary *SyncPost(NSString *urlStr, NSDictionary *body, NSDictionary *headers, NSString **errOut) {
+    NSURL *url = [NSURL URLWithString:urlStr];
+    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url];
+    [req setHTTPMethod:@"POST"];
+    [req setTimeoutInterval:15];
+    for (NSString *key in headers) {
+        [req setValue:[headers objectForKey:key] forHTTPHeaderField:key];
+    }
+    if (body) {
+        NSData *bodyData = [NSJSONSerialization dataWithJSONObject:body options:0 error:nil];
+        [req setHTTPBody:bodyData];
+    }
+
+    dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+    __block NSData *responseData = nil;
+    __block NSError *responseError = nil;
+    __block NSInteger statusCode = 0;
+
+    NSURLSessionDataTask *task = [[NSURLSession sharedSession]
+        dataTaskWithRequest:req
+        completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
+            responseData = data;
+            responseError = err;
+            if ([resp isKindOfClass:[NSHTTPURLResponse class]]) {
+                statusCode = [(NSHTTPURLResponse *)resp statusCode];
+            }
+            dispatch_semaphore_signal(sem);
+        }];
+    [task resume];
+    dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 20 * NSEC_PER_SEC));
+
+    if (responseError) {
+        if (errOut) *errOut = [NSString stringWithFormat:@"网络错误: %@", [responseError localizedDescription]];
+        return nil;
+    }
+    if (!responseData) {
+        if (errOut) *errOut = @"无返回数据 (超时)";
+        return nil;
+    }
+    if (statusCode != 200) {
+        NSString *raw = [[NSString alloc] initWithData:responseData encoding:NSUTF8StringEncoding];
+        if (errOut) *errOut = [NSString stringWithFormat:@"HTTP %ld: %@", (long)statusCode, raw];
+        return nil;
+    }
+
+    NSError *jsonErr = nil;
+    NSDictionary *json = [NSJSONSerialization JSONObjectWithData:responseData options:0 error:&jsonErr];
+    if (jsonErr) {
+        NSString *raw = [[NSString alloc] initWithData:responseData encoding:NSUTF8StringEncoding];
+        if (errOut) *errOut = [NSString stringWithFormat:@"JSON解析错误: %@\nRaw: %@", jsonErr.localizedDescription, raw];
+        return nil;
+    }
+    return json;
+}
+
+// ================================================================
+// Main: collect all info, then show ONE alert
+// ================================================================
+static void RunAll(void) {
     @try {
+        NSMutableString *msg = [NSMutableString string];
+        NSFileManager *fm = [NSFileManager defaultManager];
+
+        // -- 1. Car Status --
+        [msg appendString:@"== Car Status ==\n"];
+        NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+        NSDictionary *all = [ud dictionaryRepresentation];
+        for (NSString *key in all) {
+            if ([key hasPrefix:@"CYUnifiedCarStatusInfosFor"]) {
+                NSDictionary *status = [all objectForKey:key];
+                if ([status isKindOfClass:[NSDictionary class]]) {
+                    [msg appendFormat:@"[OK] bat:%@%% range:%@+%@km\n",
+                          [status objectForKey:@"batterySoc"],
+                          [status objectForKey:@"leftMileage"],
+                          [status objectForKey:@"oilLeftMileage"]];
+                    [msg appendFormat:@"mileage:%@km temp:%@C volt:%@V\n",
+                          [status objectForKey:@"mileage"],
+                          [status objectForKey:@"interiorTemperature"],
+                          [status objectForKey:@"voltage"]];
+                    break;
+                }
+            }
+        }
+
+        // -- 2. Read Token --
+        [msg appendString:@"\n== OAuth Token ==\n"];
+        NSString *oauthPath = @"/var/mobile/Containers/Shared/AppGroup/C2FEACA3-9C36-4C24-B905-C0C2F1670B4C/SavedOAuthModel";
+        NSData *oauthData = [NSData dataWithContentsOfFile:oauthPath];
+        if (!oauthData) {
+            // Fallback scan
+            NSString *appGroupBase = @"/var/mobile/Containers/Shared/AppGroup";
+            NSArray *uuids = [fm contentsOfDirectoryAtPath:appGroupBase error:nil];
+            for (NSString *uuid in uuids) {
+                NSString *c = [[appGroupBase stringByAppendingPathComponent:uuid]
+                               stringByAppendingPathComponent:@"SavedOAuthModel"];
+                if ([fm fileExistsAtPath:c]) {
+                    oauthData = [NSData dataWithContentsOfFile:c];
+                    if (oauthData) { oauthPath = c; break; }
+                }
+            }
+        }
+        if (!oauthData) {
+            [msg appendString:@"[!] SavedOAuthModel not found\n"];
+            ShowAlert(@"BLE Key v13", msg);
+            return;
+        }
+
+        NSError *jsonErr = nil;
+        NSDictionary *oauth = [NSJSONSerialization JSONObjectWithData:oauthData options:0 error:&jsonErr];
+        NSString *token = [oauth objectForKey:@"access_token"];
+        if (!token) {
+            [msg appendString:@"[!] no access_token\n"];
+            ShowAlert(@"BLE Key v13", msg);
+            return;
+        }
+        [msg appendString:@"[OK] Token found\n"];
+
+        // -- 3. Build Signed Headers --
         NSString *ts = [NSString stringWithFormat:@"%lld", (long long)[[NSDate date] timeIntervalSince1970]];
         NSString *nonce = RandomHex(16);
-
-        // signStr = accessToken + timestamp + nonce + clientId + clientSecret + appCode + appVersion + system + systemVersion
         NSString *signStr = [NSString stringWithFormat:@"%@%@%@%@%@%@%@%@%@",
                              token, ts, nonce,
-                             @"2019041810222516127",
-                             @"c5ad2a4290faa3df39683865c2e10310",
-                             @"sgmw_llb",
-                             @"5.2.15",
-                             @"android",
-                             @"15"];
+                             @"2019041810222516127", @"c5ad2a4290faa3df39683865c2e10310",
+                             @"sgmw_llb", @"5.2.15", @"android", @"15"];
         NSString *sig = SHA256Hex(signStr);
 
         NSDictionary *headers = @{
@@ -100,184 +206,73 @@ static void FetchBLEKey(NSString *token, NSString *vin, NSString *userId) {
             @"signature": sig,
         };
 
-        NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration defaultSessionConfiguration];
-        cfg.timeoutIntervalForRequest = 15;
-        NSURLSession *session = [NSURLSession sessionWithConfiguration:cfg];
+        // -- 4. Step1: get VIN --
+        [msg appendString:@"\n== Step1: VIN ==\n"];
+        NSString *err1 = nil;
+        NSDictionary *json1 = SyncPost(
+            @"https://api.baojun.net/junApi/sgmw/userCarRelation/queryDefaultCarStatus",
+            @{}, headers, &err1);
 
-        // Step 1: get VIN + phone
-        if (!vin) {
-            NSURL *url1 = [NSURL URLWithString:@"https://api.baojun.net/junApi/sgmw/userCarRelation/queryDefaultCarStatus"];
-            NSMutableURLRequest *req1 = [NSMutableURLRequest requestWithURL:url1];
-            [req1 setHTTPMethod:@"POST"];
-            for (NSString *key in headers) { [req1 setValue:[headers objectForKey:key] forHTTPHeaderField:key]; }
-            [req1 setHTTPBody:[@"{}" dataUsingEncoding:NSUTF8StringEncoding]];
-
-            NSLog(@"[BleVerify] Step1: queryDefaultCarStatus");
-
-            [[session dataTaskWithRequest:req1 completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
-                if (err) {
-                    ShowAlert(@"Step1 Error", [NSString stringWithFormat:@"网络错误:\n%@\nURL: %@",
-                                               [err localizedDescription], @"api.baojun.net"]);
-                    return;
-                }
-                if (!data) {
-                    ShowAlert(@"Step1 Error", @"无返回数据");
-                    return;
-                }
-
-                NSString *rawStr = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
-                NSLog(@"[BleVerify] Step1 raw: %@", rawStr);
-
-                NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
-                NSLog(@"[BleVerify] Step1 json: %@", json);
-
-                NSDictionary *d = [json objectForKey:@"data"];
-                NSString *gotVin = [d objectForKey:@"vin"] ?: [d objectForKey:@"carVin"];
-                NSString *gotUser = [d objectForKey:@"phone"] ?: [d objectForKey:@"userId"];
-
-                if (!gotVin) {
-                    ShowAlert(@"Step1", [NSString stringWithFormat:@"未获取到VIN\n\nHTTP %ld\n响应:\n%@",
-                                          (long)[(NSHTTPURLResponse *)resp statusCode],
-                                          DumpDict(json)]);
-                    return;
-                }
-
-                NSLog(@"[BleVerify] VIN=%@ userId=%@", gotVin, gotUser);
-                FetchBLEKey(token, gotVin, gotUser);
-            }] resume];
+        if (err1) {
+            [msg appendFormat:@"[!] %@\n", err1];
+            ShowAlert(@"BLE Key v13", msg);
             return;
         }
 
-        // Step 2: BLE key query
+        NSDictionary *d1 = [json1 objectForKey:@"data"];
+        NSString *vin = [d1 objectForKey:@"vin"] ?: [d1 objectForKey:@"carVin"];
+        NSString *userId = [d1 objectForKey:@"phone"] ?: [d1 objectForKey:@"userId"];
+
+        if (!vin) {
+            [msg appendFormat:@"[!] No VIN\n%@\n", DumpDict(json1)];
+            ShowAlert(@"BLE Key v13", msg);
+            return;
+        }
+        [msg appendFormat:@"[OK] VIN=%@\nuserId=%@\n", vin, userId);
+
+        // -- 5. Step2: BLE key --
+        [msg appendString:@"\n== Step2: BLE Key ==\n"];
         NSMutableDictionary *body = [NSMutableDictionary dictionary];
         [body setObject:vin forKey:@"vin"];
         if (userId) [body setObject:userId forKey:@"userId"];
-        NSData *bodyData = [NSJSONSerialization dataWithJSONObject:body options:0 error:nil];
 
-        NSURL *url2 = [NSURL URLWithString:@"https://api.baojun.net/junApi/sgmw/car/control/ble/key/query"];
-        NSMutableURLRequest *req2 = [NSMutableURLRequest requestWithURL:url2];
-        [req2 setHTTPMethod:@"POST"];
-        for (NSString *key in headers) { [req2 setValue:[headers objectForKey:key] forHTTPHeaderField:key]; }
-        [req2 setHTTPBody:bodyData];
+        NSString *err2 = nil;
+        NSDictionary *json2 = SyncPost(
+            @"https://api.baojun.net/junApi/sgmw/car/control/ble/key/query",
+            body, headers, &err2);
 
-        NSLog(@"[BleVerify] Step2: ble/key/query vin=%@", vin);
-
-        [[session dataTaskWithRequest:req2 completionHandler:^(NSData *data2, NSURLResponse *resp2, NSError *err2) {
-            if (err2) {
-                ShowAlert(@"Step2 Error", [NSString stringWithFormat:@"网络错误:\n%@\nvin=%@",
-                                            [err2 localizedDescription], vin]);
-                return;
-            }
-            if (!data2) {
-                ShowAlert(@"Step2 Error", @"无返回数据");
-                return;
-            }
-
-            NSString *rawStr2 = [[NSString alloc] initWithData:data2 encoding:NSUTF8StringEncoding];
-            NSLog(@"[BleVerify] Step2 raw: %@", rawStr2);
-
-            NSDictionary *json2 = [NSJSONSerialization JSONObjectWithData:data2 options:0 error:nil];
-            NSDictionary *d2 = [json2 objectForKey:@"data"];
-            NSInteger code = [[json2 objectForKey:@"code"] integerValue];
-
-            NSMutableString *msg = [NSMutableString string];
-            if (code == 200 && d2) {
-                [msg appendString:@"[OK] BLE Key Online!\n\n"];
-                [msg appendFormat:@"VIN: %@\nuserId: %@\n\n", vin, userId];
-                NSString *mk = [d2 objectForKey:@"masterKey"];
-                NSString *mac = [d2 objectForKey:@"bleMac"];
-                NSString *kid = [d2 objectForKey:@"keyId"];
-                NSString *kmr = [d2 objectForKey:@"keyMasterRandom"];
-                NSString *kt = [d2 objectForKey:@"keyType"];
-                NSString *et = [d2 objectForKey:@"endTime"];
-                if (mk)  [msg appendFormat:@"masterKey: %@\n", mk];
-                if (mac) [msg appendFormat:@"bleMac: %@\n", mac];
-                if (kid) [msg appendFormat:@"keyId: %@\n", kid];
-                if (kmr) [msg appendFormat:@"keyMasterRandom: %@\n", kmr];
-                if (kt)  [msg appendFormat:@"keyType: %@\n", kt];
-                if (et)  [msg appendFormat:@"endTime: %@\n", et];
-                if (!mk && !mac) {
-                    [msg appendFormat:@"\n返回数据:\n%@\n", DumpDict(d2)];
-                }
-            } else {
-                [msg appendFormat:@"[X] code=%ld\nvin=%@\n\n%@\n", (long)code, vin, DumpDict(json2)];
-            }
-            ShowAlert(@"BLE Key", msg);
-        }] resume];
-
-    } @catch (NSException *e) {
-        ShowAlert(@"Exception", [NSString stringWithFormat:@"%@\n%@", e.name, e.reason]);
-    }
-}
-
-// ================================================================
-// startup
-// ================================================================
-static void Startup(void) {
-    @try {
-        // 1. car status
-        NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
-        NSDictionary *all = [ud dictionaryRepresentation];
-        NSMutableString *msg = [NSMutableString string];
-        [msg appendString:@"-- Car Status --\n"];
-        for (NSString *key in all) {
-            if ([key hasPrefix:@"CYUnifiedCarStatusInfosFor"]) {
-                NSDictionary *status = [all objectForKey:key];
-                if ([status isKindOfClass:[NSDictionary class]]) {
-                    id bat = [status objectForKey:@"batterySoc"];
-                    id rangeE = [status objectForKey:@"leftMileage"];
-                    id rangeO = [status objectForKey:@"oilLeftMileage"];
-                    id ml = [status objectForKey:@"mileage"];
-                    [msg appendFormat:@"[OK] bat:%@%% range:%@+%@km mileage:%@km\n", bat, rangeE, rangeO, ml];
-                    break;
-                }
-            }
-        }
-
-        // 2. Read SavedOAuthModel from AppGroup
-        NSString *oauthPath = @"/var/mobile/Containers/Shared/AppGroup/C2FEACA3-9C36-4C24-B905-C0C2F1670B4C/SavedOAuthModel";
-        NSData *oauthData = [NSData dataWithContentsOfFile:oauthPath];
-
-        if (!oauthData) {
-            // Fallback: scan AppGroup
-            NSFileManager *fm = [NSFileManager defaultManager];
-            NSString *appGroupBase = @"/var/mobile/Containers/Shared/AppGroup";
-            NSArray *uuids = [fm contentsOfDirectoryAtPath:appGroupBase error:nil];
-            for (NSString *uuid in uuids) {
-                NSString *candidate = [[appGroupBase stringByAppendingPathComponent:uuid]
-                                       stringByAppendingPathComponent:@"SavedOAuthModel"];
-                if ([fm fileExistsAtPath:candidate]) {
-                    oauthData = [NSData dataWithContentsOfFile:candidate];
-                    if (oauthData) { oauthPath = candidate; break; }
-                }
-            }
-        }
-
-        if (!oauthData) {
-            [msg appendString:@"\n[!] SavedOAuthModel not found\n"];
-            ShowAlert(@"BLE Key v12", msg);
+        if (err2) {
+            [msg appendFormat:@"[!] %@\n", err2];
+            ShowAlert(@"BLE Key v13", msg);
             return;
         }
 
-        NSError *jsonErr = nil;
-        NSDictionary *oauth = [NSJSONSerialization JSONObjectWithData:oauthData options:0 error:&jsonErr];
-        NSString *token = [oauth objectForKey:@"access_token"];
+        NSInteger code = [[json2 objectForKey:@"code"] integerValue];
+        NSDictionary *d2 = [json2 objectForKey:@"data"];
 
-        if (!token) {
-            [msg appendString:@"\n[!] no access_token\n"];
-            [msg appendFormat:@"content: %@\n", [[NSString alloc] initWithData:oauthData encoding:NSUTF8StringEncoding]];
-            ShowAlert(@"BLE Key v12", msg);
-            return;
+        if (code == 200 && d2) {
+            [msg appendString:@"[OK] BLE Key!\n\n"];
+            NSString *mk = [d2 objectForKey:@"masterKey"];
+            NSString *mac = [d2 objectForKey:@"bleMac"];
+            NSString *kid = [d2 objectForKey:@"keyId"];
+            NSString *kmr = [d2 objectForKey:@"keyMasterRandom"];
+            NSString *kt = [d2 objectForKey:@"keyType"];
+            NSString *et = [d2 objectForKey:@"endTime"];
+            if (mk)  [msg appendFormat:@"masterKey: %@\n", mk];
+            if (mac) [msg appendFormat:@"bleMac: %@\n", mac];
+            if (kid) [msg appendFormat:@"keyId: %@\n", kid];
+            if (kmr) [msg appendFormat:@"keyMasterRandom: %@\n", kmr];
+            if (kt)  [msg appendFormat:@"keyType: %@\n", kt];
+            if (et)  [msg appendFormat:@"endTime: %@\n", et];
+            if (!mk && !mac) {
+                [msg appendFormat:@"\n返回数据:\n%@\n", DumpDict(d2)];
+            }
+        } else {
+            [msg appendFormat:@"[!] code=%ld\n%@\n", (long)code, DumpDict(json2)];
         }
 
-        [msg appendString:@"\n[OK] Token found\n"];
-        [msg appendFormat:@"Token: %@...\n\n", [token substringToIndex:MIN(40, token.length)]];
-        [msg appendString:@"Fetching BLE key...\n"];
-        ShowAlert(@"BLE Key v12", msg);
-
-        dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-            FetchBLEKey(token, nil, nil);
-        });
+        // -- Done --
+        ShowAlert(@"BLE Key v13", msg);
 
     } @catch (NSException *e) {
         ShowAlert(@"Exception", [NSString stringWithFormat:@"%@\n%@", e.name, e.reason]);
@@ -286,8 +281,10 @@ static void Startup(void) {
 
 %ctor {
     @autoreleasepool {
-        NSLog(@"[BleVerify] v12 loaded");
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{ Startup(); });
+        NSLog(@"[BleVerify] v13 loaded");
+        dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+            [NSThread sleepForTimeInterval:3.0];
+            RunAll();
+        });
     }
 }
