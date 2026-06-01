@@ -11,11 +11,11 @@ static void ShowAlert(NSString *title, NSString *msg) {
         UIAlertController *a = [UIAlertController alertControllerWithTitle:title
                                                                   message:msg
                                                            preferredStyle:UIAlertControllerStyleAlert];
-        [a addAction:[UIAlertAction actionWithTitle:@"Copy" style:UIAlertActionStyleDefault
+        [a addAction:[UIAlertAction actionWithTitle:@"复制" style:UIAlertActionStyleDefault
                                             handler:^(UIAlertAction *_) {
             UIPasteboard.generalPasteboard.string = msg ?: @"";
         }]];
-        [a addAction:[UIAlertAction actionWithTitle:@"Close" style:UIAlertActionStyleCancel handler:nil]];
+        [a addAction:[UIAlertAction actionWithTitle:@"关闭" style:UIAlertActionStyleCancel handler:nil]];
         UIViewController *top = nil;
         for (UIScene *s in UIApplication.sharedApplication.connectedScenes) {
             if ([s isKindOfClass:UIWindowScene.class]) {
@@ -68,22 +68,27 @@ static NSString *DumpDict(NSDictionary *d) {
 }
 
 // ================================================================
-// online fetch BLE key
+// online fetch
 // ================================================================
-static void FetchBLEKey(NSString *accessToken, NSString *vin, NSString *userId) {
+static void FetchBLEKey(NSString *token, NSString *vin, NSString *userId) {
     @try {
-        // build signed headers
         NSString *ts = [NSString stringWithFormat:@"%lld", (long long)[[NSDate date] timeIntervalSince1970]];
         NSString *nonce = RandomHex(16);
+
+        // signStr = accessToken + timestamp + nonce + clientId + clientSecret + appCode + appVersion + system + systemVersion
         NSString *signStr = [NSString stringWithFormat:@"%@%@%@%@%@%@%@%@%@",
-                             accessToken, ts, nonce,
-                             @"2019041810222516127", @"c5ad2a4290faa3df39683865c2e10310",
-                             @"sgmw_llb", @"5.2.15", @"android", @"15"];
-        NSString *signature = SHA256Hex(signStr);
+                             token, ts, nonce,
+                             @"2019041810222516127",
+                             @"c5ad2a4290faa3df39683865c2e10310",
+                             @"sgmw_llb",
+                             @"5.2.15",
+                             @"android",
+                             @"15"];
+        NSString *sig = SHA256Hex(signStr);
 
         NSDictionary *headers = @{
             @"Content-Type": @"application/json",
-            @"accessToken": accessToken,
+            @"accessToken": token,
             @"timestamp": ts,
             @"nonce": nonce,
             @"clientId": @"2019041810222516127",
@@ -92,13 +97,14 @@ static void FetchBLEKey(NSString *accessToken, NSString *vin, NSString *userId) 
             @"appVersion": @"5.2.15",
             @"sgmwsystem": @"android",
             @"sgmwappversion": @"5.2.15",
-            @"signature": signature,
+            @"signature": sig,
         };
 
         NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration defaultSessionConfiguration];
+        cfg.timeoutIntervalForRequest = 15;
         NSURLSession *session = [NSURLSession sessionWithConfiguration:cfg];
 
-        // If no VIN, get it first
+        // Step 1: get VIN + phone
         if (!vin) {
             NSURL *url1 = [NSURL URLWithString:@"https://api.baojun.net/junApi/sgmw/userCarRelation/queryDefaultCarStatus"];
             NSMutableURLRequest *req1 = [NSMutableURLRequest requestWithURL:url1];
@@ -106,24 +112,38 @@ static void FetchBLEKey(NSString *accessToken, NSString *vin, NSString *userId) 
             for (NSString *key in headers) { [req1 setValue:[headers objectForKey:key] forHTTPHeaderField:key]; }
             [req1 setHTTPBody:[@"{}" dataUsingEncoding:NSUTF8StringEncoding]];
 
+            NSLog(@"[BleVerify] Step1: queryDefaultCarStatus");
+
             [[session dataTaskWithRequest:req1 completionHandler:^(NSData *data, NSURLResponse *resp, NSError *err) {
-                if (err || !data) {
-                    ShowAlert(@"Step1 Error", err ? [err localizedDescription] : @"No data");
+                if (err) {
+                    ShowAlert(@"Step1 Error", [NSString stringWithFormat:@"网络错误:\n%@\nURL: %@",
+                                               [err localizedDescription], @"api.baojun.net"]);
                     return;
                 }
+                if (!data) {
+                    ShowAlert(@"Step1 Error", @"无返回数据");
+                    return;
+                }
+
+                NSString *rawStr = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+                NSLog(@"[BleVerify] Step1 raw: %@", rawStr);
+
                 NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
-                NSLog(@"[BleVerify] Step1: %@", json);
+                NSLog(@"[BleVerify] Step1 json: %@", json);
 
                 NSDictionary *d = [json objectForKey:@"data"];
                 NSString *gotVin = [d objectForKey:@"vin"] ?: [d objectForKey:@"carVin"];
                 NSString *gotUser = [d objectForKey:@"phone"] ?: [d objectForKey:@"userId"];
 
                 if (!gotVin) {
-                    ShowAlert(@"No VIN", DumpDict(json));
+                    ShowAlert(@"Step1", [NSString stringWithFormat:@"未获取到VIN\n\nHTTP %ld\n响应:\n%@",
+                                          (long)[(NSHTTPURLResponse *)resp statusCode],
+                                          DumpDict(json)]);
                     return;
                 }
 
-                FetchBLEKey(accessToken, gotVin, gotUser);
+                NSLog(@"[BleVerify] VIN=%@ userId=%@", gotVin, gotUser);
+                FetchBLEKey(token, gotVin, gotUser);
             }] resume];
             return;
         }
@@ -140,14 +160,23 @@ static void FetchBLEKey(NSString *accessToken, NSString *vin, NSString *userId) 
         for (NSString *key in headers) { [req2 setValue:[headers objectForKey:key] forHTTPHeaderField:key]; }
         [req2 setHTTPBody:bodyData];
 
+        NSLog(@"[BleVerify] Step2: ble/key/query vin=%@", vin);
+
         [[session dataTaskWithRequest:req2 completionHandler:^(NSData *data2, NSURLResponse *resp2, NSError *err2) {
-            if (err2 || !data2) {
-                ShowAlert(@"Step2 Error", err2 ? [err2 localizedDescription] : @"No data");
+            if (err2) {
+                ShowAlert(@"Step2 Error", [NSString stringWithFormat:@"网络错误:\n%@\nvin=%@",
+                                            [err2 localizedDescription], vin]);
                 return;
             }
-            NSDictionary *json2 = [NSJSONSerialization JSONObjectWithData:data2 options:0 error:nil];
-            NSLog(@"[BleVerify] Step2: %@", json2);
+            if (!data2) {
+                ShowAlert(@"Step2 Error", @"无返回数据");
+                return;
+            }
 
+            NSString *rawStr2 = [[NSString alloc] initWithData:data2 encoding:NSUTF8StringEncoding];
+            NSLog(@"[BleVerify] Step2 raw: %@", rawStr2);
+
+            NSDictionary *json2 = [NSJSONSerialization JSONObjectWithData:data2 options:0 error:nil];
             NSDictionary *d2 = [json2 objectForKey:@"data"];
             NSInteger code = [[json2 objectForKey:@"code"] integerValue];
 
@@ -168,10 +197,10 @@ static void FetchBLEKey(NSString *accessToken, NSString *vin, NSString *userId) 
                 if (kt)  [msg appendFormat:@"keyType: %@\n", kt];
                 if (et)  [msg appendFormat:@"endTime: %@\n", et];
                 if (!mk && !mac) {
-                    [msg appendFormat:@"\nFull data:\n%@\n", DumpDict(d2)];
+                    [msg appendFormat:@"\n返回数据:\n%@\n", DumpDict(d2)];
                 }
             } else {
-                [msg appendFormat:@"[X] code=%ld\n\n%@\n", (long)code, DumpDict(json2)];
+                [msg appendFormat:@"[X] code=%ld\nvin=%@\n\n%@\n", (long)code, vin, DumpDict(json2)];
             }
             ShowAlert(@"BLE Key", msg);
         }] resume];
@@ -186,10 +215,9 @@ static void FetchBLEKey(NSString *accessToken, NSString *vin, NSString *userId) 
 // ================================================================
 static void Startup(void) {
     @try {
-        // 1. Read car status
+        // 1. car status
         NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
         NSDictionary *all = [ud dictionaryRepresentation];
-
         NSMutableString *msg = [NSMutableString string];
         [msg appendString:@"-- Car Status --\n"];
         for (NSString *key in all) {
@@ -207,82 +235,46 @@ static void Startup(void) {
         }
 
         // 2. Read SavedOAuthModel from AppGroup
-        NSFileManager *fm = [NSFileManager defaultManager];
-        NSData *oauthData = nil;
-        NSString *foundPath = nil;
+        NSString *oauthPath = @"/var/mobile/Containers/Shared/AppGroup/C2FEACA3-9C36-4C24-B905-C0C2F1670B4C/SavedOAuthModel";
+        NSData *oauthData = [NSData dataWithContentsOfFile:oauthPath];
 
-        // Try multiple possible group identifiers
-        NSArray *groupIds = @[
-            @"group.com.cloudy.LingLingBang",
-            @"group.com.cloudyoung.linglingbang",
-            @"group.com.cloudy.linglingbang",
-            @"group.baojun",
-            @"group.sgmw",
-        ];
-
-        for (NSString *groupId in groupIds) {
-            NSURL *groupURL = [fm containerURLForSecurityApplicationGroupIdentifier:groupId];
-            if (groupURL) {
-                NSString *candidate = [[groupURL path] stringByAppendingPathComponent:@"SavedOAuthModel"];
-                if ([fm fileExistsAtPath:candidate]) {
-                    oauthData = [NSData dataWithContentsOfFile:candidate];
-                    if (oauthData) {
-                        foundPath = candidate;
-                        break;
-                    }
-                }
-            }
-        }
-
-        // If not found, try to read from known path pattern
         if (!oauthData) {
-            // Also try direct path with common UUID patterns
+            // Fallback: scan AppGroup
+            NSFileManager *fm = [NSFileManager defaultManager];
             NSString *appGroupBase = @"/var/mobile/Containers/Shared/AppGroup";
-            NSArray *groupUUIDs = [fm contentsOfDirectoryAtPath:appGroupBase error:nil];
-            for (NSString *uuid in groupUUIDs) {
+            NSArray *uuids = [fm contentsOfDirectoryAtPath:appGroupBase error:nil];
+            for (NSString *uuid in uuids) {
                 NSString *candidate = [[appGroupBase stringByAppendingPathComponent:uuid]
                                        stringByAppendingPathComponent:@"SavedOAuthModel"];
                 if ([fm fileExistsAtPath:candidate]) {
                     oauthData = [NSData dataWithContentsOfFile:candidate];
-                    if (oauthData) {
-                        foundPath = candidate;
-                        break;
-                    }
+                    if (oauthData) { oauthPath = candidate; break; }
                 }
             }
         }
 
         if (!oauthData) {
             [msg appendString:@"\n[!] SavedOAuthModel not found\n"];
-            [msg appendString:@"Tried group IDs:\n"];
-            for (NSString *gid in groupIds) {
-                NSURL *url = [fm containerURLForSecurityApplicationGroupIdentifier:gid];
-                [msg appendFormat:@"  %@ => %@\n", gid, url ? [url path] : @"nil"];
-            }
-            ShowAlert(@"BLE Key v10", msg);
+            ShowAlert(@"BLE Key v12", msg);
             return;
         }
-
-        [msg appendFormat:@"\n[OK] Found: %@\n", foundPath];
 
         NSError *jsonErr = nil;
         NSDictionary *oauth = [NSJSONSerialization JSONObjectWithData:oauthData options:0 error:&jsonErr];
         NSString *token = [oauth objectForKey:@"access_token"];
 
         if (!token) {
-            [msg appendString:@"\n[!] No access_token in file\n"];
-            [msg appendFormat:@"  Content: %@\n", [[NSString alloc] initWithData:oauthData encoding:NSUTF8StringEncoding]];
-            ShowAlert(@"BLE Key v10", msg);
+            [msg appendString:@"\n[!] no access_token\n"];
+            [msg appendFormat:@"content: %@\n", [[NSString alloc] initWithData:oauthData encoding:NSUTF8StringEncoding]];
+            ShowAlert(@"BLE Key v12", msg);
             return;
         }
 
-        [msg appendString:@"\n[OK] Token from SavedOAuthModel\n"];
-        [msg appendFormat:@"  Token: %@...\n\n", [token substringToIndex:MIN(40, token.length)]];
-        [msg appendString:@"Fetching BLE key online...\n"];
+        [msg appendString:@"\n[OK] Token found\n"];
+        [msg appendFormat:@"Token: %@...\n\n", [token substringToIndex:MIN(40, token.length)]];
+        [msg appendString:@"Fetching BLE key...\n"];
+        ShowAlert(@"BLE Key v12", msg);
 
-        ShowAlert(@"BLE Key v10", msg);
-
-        // 3. Fetch BLE key
         dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
             FetchBLEKey(token, nil, nil);
         });
@@ -294,7 +286,7 @@ static void Startup(void) {
 
 %ctor {
     @autoreleasepool {
-        NSLog(@"[BleVerify] v10 loaded in %@", [[NSProcessInfo processInfo] processName]);
+        NSLog(@"[BleVerify] v12 loaded");
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{ Startup(); });
     }
