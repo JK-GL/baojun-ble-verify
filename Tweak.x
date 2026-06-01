@@ -228,7 +228,7 @@ static void RunAll(void) {
             ShowAlert(@"BLE Key v13", msg);
             return;
         }
-        [msg appendFormat:@"[OK] VIN=%@\nuserId=%@\n", vin, userId);
+        [msg appendFormat:@"[OK] VIN=%@\nuserId=%@\n", vin, userId];
 
         // -- 5. Step2: BLE key --
         [msg appendString:@"\n== Step2: BLE Key ==\n"];
