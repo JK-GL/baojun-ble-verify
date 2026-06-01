@@ -149,21 +149,32 @@ static void RunAll(void) {
             }
         }
 
-        // == 2. Read Token from AppGroup ==
+        // == 2. Read Token from AppGroup (native API) ==
         [msg appendString:@"\n== Token ==\n"];
-        NSString *oauthPath = @"/var/mobile/Containers/Shared/AppGroup/group.com.cloudy.LingLingBang/SavedOAuthModel";
-        NSData *oauthData = [NSData dataWithContentsOfFile:oauthPath];
+        NSData *oauthData = nil;
+        NSString *foundPath = nil;
+        NSFileManager *fm = [NSFileManager defaultManager];
+
+        // Primary: use iOS native API to get AppGroup container path
+        NSURL *groupURL = [fm containerURLForSecurityApplicationGroupIdentifier:@"group.com.cloudy.LingLingBang"];
+        if (groupURL) {
+            NSString *candidate = [[groupURL path] stringByAppendingPathComponent:@"SavedOAuthModel"];
+            if ([fm fileExistsAtPath:candidate]) {
+                oauthData = [NSData dataWithContentsOfFile:candidate];
+                if (oauthData) foundPath = candidate;
+            }
+        }
+
+        // Fallback: scan AppGroup directories
         if (!oauthData) {
-            // Fallback: scan AppGroup for SavedOAuthModel
             NSString *appGroupBase = @"/var/mobile/Containers/Shared/AppGroup";
-            NSFileManager *fm = [NSFileManager defaultManager];
             NSArray *uuids = [fm contentsOfDirectoryAtPath:appGroupBase error:nil];
             for (NSString *uuid in uuids) {
                 NSString *c = [[appGroupBase stringByAppendingPathComponent:uuid]
                                stringByAppendingPathComponent:@"SavedOAuthModel"];
                 if ([fm fileExistsAtPath:c]) {
                     oauthData = [NSData dataWithContentsOfFile:c];
-                    if (oauthData) { oauthPath = c; break; }
+                    if (oauthData) { foundPath = c; break; }
                 }
             }
         }
